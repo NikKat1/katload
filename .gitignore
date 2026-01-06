@@ -1,0 +1,4 @@
+.env
+downloads/
+bot.log
+__pycache__/
