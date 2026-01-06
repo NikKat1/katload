@@ -85,9 +85,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "Отправь ссылку на видео:\n"
-        "• YouTube (youtu.be)\n"
-        "• TikTok (vt.tiktok.com)\n"
-        "• Pinterest (pin.it)\n\n"
+        "• YouTube (youtu.be / youtube.com)\n"
+        "• Pinterest (pin.it / pinterest.com)\n\n"
         "Я дам выбор качества и отправлю MP4.\n"
         "⏱ Лимит: 1 видео в минуту"
     )
@@ -110,18 +109,21 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Это не ссылка.")
         return
 
+    # ❌ TikTok отключён
+    if "tiktok.com" in url or "vt.tiktok.com" in url:
+        await update.message.reply_text("❌ TikTok отключён в этом боте.")
+        return
+
     await update.message.reply_text("🔍 Анализирую ссылку...")
 
-    # yt-dlp сам определяет платформу (YouTube/TikTok/Pinterest)
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
             info = ydl.extract_info(url, download=False)
-    except Exception:
+    except:
         logging.error(traceback.format_exc())
         await update.message.reply_text("❌ Не удалось обработать ссылку.")
         return
 
-    # Собираем форматы (видео)
     formats = []
     for f in info.get("formats", []):
         if f.get("vcodec") != "none" and f.get("height"):
@@ -131,7 +133,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Подходящие форматы не найдены.")
         return
 
-    # Убираем дубликаты качеств
     uniq, seen = [], set()
     for fid, lab in sorted(formats, key=lambda x: int(x[1].replace("p",""))):
         if lab not in seen:
@@ -143,10 +144,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [[InlineKeyboardButton(lab, callback_data=f"dl|{fid}|{url}")] for fid, lab in uniq]
     buttons.append([InlineKeyboardButton("🔥 Максимальное качество (MP4)", callback_data=f"dl|best|{url}")])
 
-    await update.message.reply_text(
-        "🎥 Выбери качество:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await update.message.reply_text("🎥 Выбери качество:", reply_markup=InlineKeyboardMarkup(buttons))
 
 # ================= CALLBACK =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,11 +168,17 @@ async def queue_worker(app):
             try:
                 await q.message.edit_text("⏬ Скачиваю: 0%")
 
-                # БЕЗ FFMPEG: берём ТОЛЬКО готовый MP4 со звуком
-                if fid == "best":
+                is_pinterest = ("pin.it" in url) or ("pinterest." in url)
+
+                # БЕЗ FFMPEG: только готовый MP4
+                # Для Pinterest всегда берём best (часто нет вариантов качества)
+                if is_pinterest:
                     fmt = "best[ext=mp4]/best"
                 else:
-                    fmt = f"{fid}[ext=mp4]/best"
+                    if fid == "best":
+                        fmt = "best[ext=mp4]/best"
+                    else:
+                        fmt = f"{fid}[ext=mp4]/best"
 
                 ydl_opts = {
                     "format": fmt,
@@ -190,11 +194,21 @@ async def queue_worker(app):
                     ],
                 }
 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url)
-                    filename = ydl.prepare_filename(info)
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url)
+                        filename = ydl.prepare_filename(info)
+                except Exception as e:
+                    err = str(e).lower()
+                    # Pinterest: если выбранного формата нет — пробуем best
+                    if is_pinterest and "requested format is not available" in err:
+                        with yt_dlp.YoutubeDL({**ydl_opts, "format": "best[ext=mp4]/best"}) as ydl:
+                            info = ydl.extract_info(url)
+                            filename = ydl.prepare_filename(info)
+                    else:
+                        raise
 
-                # ⚡ Быстро и надёжно: отправляем как файл (document)
+                # ⚡ Надёжная отправка — как файл (document)
                 with open(filename, "rb") as f:
                     await app.bot.send_document(
                         chat_id=q.message.chat_id,
@@ -206,7 +220,7 @@ async def queue_worker(app):
                 os.remove(filename)
                 user_last_download[uid] = time.time()
 
-            except Exception:
+            except:
                 logging.error(traceback.format_exc())
                 try:
                     await q.message.edit_text("❌ Ошибка при скачивании или отправке.")
