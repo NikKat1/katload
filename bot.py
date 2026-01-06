@@ -16,11 +16,11 @@ from telegram.ext import (
 import yt_dlp
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Токен задаётся в переменных окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")   # Токен через переменные окружения
 CHANNEL_USERNAME = "@nikkatfun"
-ADMIN_ID = 985545005  # ТВОЙ ID
+ADMIN_ID = 985545005                 # ТВОЙ ID
 DOWNLOAD_PATH = "downloads"
-RATE_LIMIT_SECONDS = 60  # 1 видео в минуту
+RATE_LIMIT_SECONDS = 60              # 1 видео в минуту
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ Переменная окружения BOT_TOKEN не установлена")
@@ -123,7 +123,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Анализирую ссылку...")
 
-    ydl_opts = {"quiet": True}
+    ydl_opts = {
+        "quiet": True,
+        "noplaylist": True,
+    }
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -134,19 +138,36 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     formats = []
     for f in info.get("formats", []):
-        if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height"):
-            formats.append((f["format_id"], f'{f["height"]}p'))
+        # Берём только форматы с видео
+        if f.get("vcodec") != "none" and f.get("height"):
+            height = f.get("height")
+            fmt_id = f.get("format_id")
+            formats.append((fmt_id, f"{height}p"))
 
     if not formats:
         await update.message.reply_text("❌ Подходящие форматы не найдены.")
         return
 
-    unique = list(dict(formats).items())[:5]
+    # Убираем дубликаты по качеству и берём до 6 вариантов
+    unique = []
+    seen = set()
+    for fmt_id, label in sorted(formats, key=lambda x: int(x[1].replace("p", ""))):
+        if label not in seen:
+            seen.add(label)
+            unique.append((fmt_id, label))
+        if len(unique) >= 6:
+            break
+
     buttons = []
     for fmt_id, label in unique:
         buttons.append(
             [InlineKeyboardButton(label, callback_data=f"dl|{fmt_id}|{url}")]
         )
+
+    # Кнопка "Максимальное качество"
+    buttons.append(
+        [InlineKeyboardButton("🔥 Максимальное качество", callback_data=f"dl|best|{url}")]
+    )
 
     await update.message.reply_text(
         "🎥 Выберите качество:",
@@ -184,10 +205,21 @@ async def queue_worker(app):
             try:
                 await query.message.edit_text("⏬ Скачиваю видео...")
 
+                # Если выбрано конкретное качество — используем его, иначе best
+                if fmt_id == "best":
+                    format_selector = "bestvideo+bestaudio/best"
+                else:
+                    # Формат с видео + добавляем лучшее аудио
+                    format_selector = f"{fmt_id}+bestaudio/best"
+
                 ydl_opts = {
-                    "format": fmt_id,
+                    "format": format_selector,
                     "outtmpl": f"{DOWNLOAD_PATH}/%(title)s.%(ext)s",
+                    "merge_output_format": "mp4",
                     "quiet": True,
+                    "noplaylist": True,
+                    "socket_timeout": 30,
+                    "retries": 3,
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -196,16 +228,30 @@ async def queue_worker(app):
 
                 await query.message.edit_text("📤 Отправляю видео...")
 
-                with open(filename, "rb") as f:
-                    await app.bot.send_video(
-                        chat_id=query.message.chat_id,
-                        video=f,
-                        caption="✅ Готово!",
-                    )
+                file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+
+                # Малые файлы — как видео
+                if file_size_mb <= 50:
+                    with open(filename, "rb") as f:
+                        await app.bot.send_video(
+                            chat_id=query.message.chat_id,
+                            video=f,
+                            caption="✅ Готово!",
+                        )
+                else:
+                    # Большие файлы — как файл (document)
+                    with open(filename, "rb") as f:
+                        await app.bot.send_document(
+                            chat_id=query.message.chat_id,
+                            document=f,
+                            caption="✅ Видео отправлено файлом (оригинальное качество)",
+                        )
 
                 os.remove(filename)
                 user_last_download[user_id] = time.time()
-                logging.info(f"Успешно отправлено пользователю {user_id}")
+                logging.info(
+                    f"Успешно отправлено пользователю {user_id}, размер: {round(file_size_mb, 2)} МБ"
+                )
 
             except Exception as e:
                 logging.error(f"Ошибка загрузки: {e}")
