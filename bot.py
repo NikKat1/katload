@@ -3,6 +3,7 @@ import re
 import time
 import asyncio
 import logging
+import traceback
 from collections import deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,11 +17,11 @@ from telegram.ext import (
 import yt_dlp
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")   # Токен из переменных окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")   # Токен через переменные окружения
 CHANNEL_USERNAME = "@nikkatfun"
 ADMIN_ID = 985545005
 DOWNLOAD_PATH = "downloads"
-RATE_LIMIT_SECONDS = 60
+RATE_LIMIT_SECONDS = 60  # 1 видео в минуту
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ Не задана переменная окружения BOT_TOKEN")
@@ -130,7 +131,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        logging.error(f"Ошибка анализа ссылки: {e}")
+        logging.error("Ошибка анализа ссылки:\n" + traceback.format_exc())
         await update.message.reply_text("❌ Не удалось обработать ссылку.")
         return
 
@@ -206,7 +207,6 @@ async def queue_worker(app):
                     "noplaylist": True,
                     "socket_timeout": 30,
                     "retries": 3,
-                    "ffmpeg_location": "./ffmpeg/ffmpeg",  # 🔥 ВАЖНО: путь к ffmpeg
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -217,26 +217,34 @@ async def queue_worker(app):
 
                 file_size_mb = os.path.getsize(filename) / (1024 * 1024)
 
-                if file_size_mb <= 50:
-                    with open(filename, "rb") as f:
-                        await app.bot.send_video(
-                            chat_id=query.message.chat_id,
-                            video=f,
-                            caption="✅ Готово!",
-                        )
-                else:
+                try:
+                    if file_size_mb <= 50:
+                        with open(filename, "rb") as f:
+                            await app.bot.send_video(
+                                chat_id=query.message.chat_id,
+                                video=f,
+                                caption="✅ Готово!",
+                            )
+                    else:
+                        with open(filename, "rb") as f:
+                            await app.bot.send_document(
+                                chat_id=query.message.chat_id,
+                                document=f,
+                                caption="✅ Видео отправлено файлом (оригинальное качество)",
+                            )
+                except Exception:
                     with open(filename, "rb") as f:
                         await app.bot.send_document(
                             chat_id=query.message.chat_id,
                             document=f,
-                            caption="✅ Видео отправлено файлом (оригинальное качество)",
+                            caption="✅ Видео отправлено файлом",
                         )
 
                 os.remove(filename)
                 user_last_download[user_id] = time.time()
 
             except Exception as e:
-                logging.error(f"Ошибка загрузки: {e}")
+                logging.error("Ошибка загрузки:\n" + traceback.format_exc())
                 try:
                     await query.message.edit_text("❌ Ошибка при скачивании или отправке.")
                 except:
