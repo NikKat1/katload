@@ -5,15 +5,25 @@ import asyncio
 import logging
 from collections import deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 import yt_dlp
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "ВАШ_ТОКЕН"
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Токен задаётся в переменных окружения
 CHANNEL_USERNAME = "@nikkatfun"
-ADMIN_ID = 985545005   # твой ID
+ADMIN_ID = 985545005  # ТВОЙ ID
 DOWNLOAD_PATH = "downloads"
-RATE_LIMIT_SECONDS = 60
+RATE_LIMIT_SECONDS = 60  # 1 видео в минуту
+
+if not BOT_TOKEN:
+    raise RuntimeError("❌ Переменная окружения BOT_TOKEN не установлена")
 
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
@@ -33,9 +43,11 @@ queue_lock = asyncio.Lock()
 # ================= ПРОВЕРКА ПОДПИСКИ =================
 async def check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        member = await context.bot.get_chat_member(CHANNEL_USERNAME, update.effective_user.id)
+        member = await context.bot.get_chat_member(
+            CHANNEL_USERNAME, update.effective_user.id
+        )
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception:
         return False
 
 # ================= START =================
@@ -51,7 +63,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Отправь ссылку на видео:\n\n"
         "🎬 YouTube\n🎵 TikTok\n📌 Pinterest\n\n"
-        "Я предложу выбор качества и отправлю файл.\n"
+        "Я предложу выбор качества и отправлю файл.\n\n"
         "⏱ Лимит: 1 видео в минуту\n"
         "🔥 Очередь загрузок включена"
     )
@@ -64,7 +76,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👑 Админ-панель\n\n"
         f"🔥 В очереди: {len(download_queue)}\n"
-        f"👥 Активных пользователей: {len(user_last_download)}\n\n"
+        f"👥 Пользователей в системе: {len(user_last_download)}\n\n"
         "Команды:\n"
         "/clearqueue — очистить очередь\n"
         "/showlog — последние логи\n"
@@ -85,7 +97,7 @@ async def showlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("bot.log", "r", encoding="utf-8") as f:
             lines = f.readlines()[-20:]
         await update.message.reply_text("🧾 Последние логи:\n\n" + "".join(lines))
-    except:
+    except Exception:
         await update.message.reply_text("❌ Не удалось прочитать лог.")
 
 # ================= ПОЛУЧЕНИЕ ССЫЛКИ =================
@@ -121,7 +133,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     formats = []
-    for f in info["formats"]:
+    for f in info.get("formats", []):
         if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height"):
             formats.append((f["format_id"], f'{f["height"]}p'))
 
@@ -132,11 +144,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     unique = list(dict(formats).items())[:5]
     buttons = []
     for fmt_id, label in unique:
-        buttons.append([InlineKeyboardButton(label, callback_data=f"dl|{fmt_id}|{url}")])
+        buttons.append(
+            [InlineKeyboardButton(label, callback_data=f"dl|{fmt_id}|{url}")]
+        )
 
     await update.message.reply_text(
         "🎥 Выберите качество:",
-        reply_markup=InlineKeyboardMarkup(buttons)
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 # ================= CALLBACK: ДОБАВЛЕНИЕ В ОЧЕРЕДЬ =================
@@ -173,7 +187,7 @@ async def queue_worker(app):
                 ydl_opts = {
                     "format": fmt_id,
                     "outtmpl": f"{DOWNLOAD_PATH}/%(title)s.%(ext)s",
-                    "quiet": True
+                    "quiet": True,
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -182,11 +196,12 @@ async def queue_worker(app):
 
                 await query.message.edit_text("📤 Отправляю видео...")
 
-                await app.bot.send_video(
-                    chat_id=query.message.chat_id,
-                    video=open(filename, "rb"),
-                    caption="✅ Готово!"
-                )
+                with open(filename, "rb") as f:
+                    await app.bot.send_video(
+                        chat_id=query.message.chat_id,
+                        video=f,
+                        caption="✅ Готово!",
+                    )
 
                 os.remove(filename)
                 user_last_download[user_id] = time.time()
@@ -196,7 +211,7 @@ async def queue_worker(app):
                 logging.error(f"Ошибка загрузки: {e}")
                 try:
                     await query.message.edit_text("❌ Ошибка при скачивании или отправке.")
-                except:
+                except Exception:
                     pass
 
         await asyncio.sleep(2)
