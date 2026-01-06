@@ -34,7 +34,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-logging.info("Бот запущен")
 
 # ================= ПАМЯТЬ =================
 user_last_download = {}
@@ -85,7 +84,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     await update.message.reply_text(
-        "Отправь ссылку на видео (YouTube / TikTok / Pinterest).\n"
+        "Отправь ссылку на видео:\n"
+        "• YouTube (youtu.be)\n"
+        "• TikTok (vt.tiktok.com)\n"
+        "• Pinterest (pin.it)\n\n"
         "Я дам выбор качества и отправлю MP4.\n"
         "⏱ Лимит: 1 видео в минуту"
     )
@@ -108,35 +110,43 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Это не ссылка.")
         return
 
-    await update.message.reply_text("🔍 Анализирую...")
+    await update.message.reply_text("🔍 Анализирую ссылку...")
 
+    # yt-dlp сам определяет платформу (YouTube/TikTok/Pinterest)
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
             info = ydl.extract_info(url, download=False)
-    except:
+    except Exception:
         logging.error(traceback.format_exc())
         await update.message.reply_text("❌ Не удалось обработать ссылку.")
         return
 
+    # Собираем форматы (видео)
     formats = []
     for f in info.get("formats", []):
         if f.get("vcodec") != "none" and f.get("height"):
-            formats.append((f["format_id"], f'{f["height"]}p'))
+            formats.append((f.get("format_id"), f"{f.get('height')}p"))
 
     if not formats:
-        await update.message.reply_text("❌ Форматы не найдены.")
+        await update.message.reply_text("❌ Подходящие форматы не найдены.")
         return
 
+    # Убираем дубликаты качеств
     uniq, seen = [], set()
     for fid, lab in sorted(formats, key=lambda x: int(x[1].replace("p",""))):
         if lab not in seen:
-            seen.add(lab); uniq.append((fid, lab))
-        if len(uniq) >= 6: break
+            seen.add(lab)
+            uniq.append((fid, lab))
+        if len(uniq) >= 6:
+            break
 
     buttons = [[InlineKeyboardButton(lab, callback_data=f"dl|{fid}|{url}")] for fid, lab in uniq]
     buttons.append([InlineKeyboardButton("🔥 Максимальное качество (MP4)", callback_data=f"dl|best|{url}")])
 
-    await update.message.reply_text("🎥 Выбери качество:", reply_markup=InlineKeyboardMarkup(buttons))
+    await update.message.reply_text(
+        "🎥 Выбери качество:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 # ================= CALLBACK =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,7 +170,7 @@ async def queue_worker(app):
             try:
                 await q.message.edit_text("⏬ Скачиваю: 0%")
 
-                # БЕЗ FFMPEG: только готовый MP4 со звуком
+                # БЕЗ FFMPEG: берём ТОЛЬКО готовый MP4 со звуком
                 if fid == "best":
                     fmt = "best[ext=mp4]/best"
                 else:
@@ -184,9 +194,7 @@ async def queue_worker(app):
                     info = ydl.extract_info(url)
                     filename = ydl.prepare_filename(info)
 
-                size_mb = os.path.getsize(filename) / (1024 * 1024)
-
-                # 🔥 Быстрая и надёжная отправка — всегда как файл
+                # ⚡ Быстро и надёжно: отправляем как файл (document)
                 with open(filename, "rb") as f:
                     await app.bot.send_document(
                         chat_id=q.message.chat_id,
@@ -198,7 +206,7 @@ async def queue_worker(app):
                 os.remove(filename)
                 user_last_download[uid] = time.time()
 
-            except:
+            except Exception:
                 logging.error(traceback.format_exc())
                 try:
                     await q.message.edit_text("❌ Ошибка при скачивании или отправке.")
