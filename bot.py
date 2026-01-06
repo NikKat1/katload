@@ -160,7 +160,7 @@ async def queue_worker(app):
             try:
                 await q.message.edit_text("⏬ Скачиваю: 0%")
 
-                # БЕЗ FFMPEG: берём ТОЛЬКО готовый MP4 со звуком
+                # БЕЗ FFMPEG: только готовый MP4 со звуком
                 if fid == "best":
                     fmt = "best[ext=mp4]/best"
                 else:
@@ -186,12 +186,14 @@ async def queue_worker(app):
 
                 size_mb = os.path.getsize(filename) / (1024 * 1024)
 
-                if size_mb <= 50:
-                    with open(filename, "rb") as f:
-                        await app.bot.send_video(q.message.chat_id, f, caption="✅ Готово!", supports_streaming=True)
-                else:
-                    with open(filename, "rb") as f:
-                        await app.bot.send_document(q.message.chat_id, f, caption="✅ MP4 (файлом)")
+                # 🔥 Быстрая и надёжная отправка — всегда как файл
+                with open(filename, "rb") as f:
+                    await app.bot.send_document(
+                        chat_id=q.message.chat_id,
+                        document=f,
+                        caption="✅ Готово (MP4)",
+                        disable_content_type_detection=True
+                    )
 
                 os.remove(filename)
                 user_last_download[uid] = time.time()
