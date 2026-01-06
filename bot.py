@@ -17,7 +17,7 @@ from telegram.ext import (
 import yt_dlp
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")   # Токен через переменные окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_USERNAME = "@nikkatfun"
 ADMIN_ID = 985545005
 DOWNLOAD_PATH = "downloads"
@@ -41,231 +41,176 @@ user_last_download = {}
 download_queue = deque()
 queue_lock = asyncio.Lock()
 
+# ================= ПРОГРЕСС =================
+def make_progress_hook(app, chat_id, message_id):
+    last = {"p": -1}
+    def hook(d):
+        try:
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                got = d.get("downloaded_bytes", 0)
+                if total:
+                    p = int(got * 100 / total)
+                    if p != last["p"]:
+                        last["p"] = p
+                        app.create_task(app.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=f"⏬ Скачиваю: {p}%"
+                        ))
+            elif d.get("status") == "finished":
+                app.create_task(app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text="📤 Отправляю видео..."
+                ))
+        except:
+            pass
+    return hook
+
 # ================= ПРОВЕРКА ПОДПИСКИ =================
 async def check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        member = await context.bot.get_chat_member(
-            CHANNEL_USERNAME, update.effective_user.id
-        )
-        return member.status in ["member", "administrator", "creator"]
-    except Exception:
+        m = await context.bot.get_chat_member(CHANNEL_USERNAME, update.effective_user.id)
+        return m.status in ["member", "administrator", "creator"]
+    except:
         return False
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_sub(update, context):
         await update.message.reply_text(
-            "🔒 Для работы с ботом подпишитесь на канал:\n"
-            "👉 https://t.me/nikkatfun\n\n"
-            "После подписки снова напишите /start"
+            "🔒 Подпишись на канал: https://t.me/nikkatfun\n"
+            "После подписки напиши /start"
         )
         return
-
     await update.message.reply_text(
-        "👋 Отправь ссылку на видео:\n\n"
-        "🎬 YouTube\n🎵 TikTok\n📌 Pinterest\n\n"
-        "Я предложу выбор качества и отправлю видео.\n"
-        "⏱ Лимит: 1 видео в минуту\n"
-        "🔥 Очередь загрузок включена"
+        "Отправь ссылку на видео (YouTube / TikTok / Pinterest).\n"
+        "Я дам выбор качества и отправлю MP4.\n"
+        "⏱ Лимит: 1 видео в минуту"
     )
-
-# ================= АДМИН =================
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    text = (
-        "👑 Админ-панель\n\n"
-        f"🔥 В очереди: {len(download_queue)}\n"
-        f"👥 Пользователей: {len(user_last_download)}\n\n"
-        "Команды:\n"
-        "/clearqueue — очистить очередь\n"
-        "/showlog — последние логи\n"
-    )
-    await update.message.reply_text(text)
-
-async def clearqueue(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    download_queue.clear()
-    await update.message.reply_text("🔥 Очередь очищена.")
-
-async def showlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    try:
-        with open("bot.log", "r", encoding="utf-8") as f:
-            lines = f.readlines()[-20:]
-        await update.message.reply_text("🧾 Последние логи:\n\n" + "".join(lines))
-    except:
-        await update.message.reply_text("❌ Не удалось прочитать лог.")
 
 # ================= ПОЛУЧЕНИЕ ССЫЛКИ =================
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
 
     if not await check_sub(update, context):
-        await update.message.reply_text(
-            "🔒 Подпишитесь на канал:\n👉 https://t.me/nikkatfun\n\n"
-            "После этого отправьте ссылку снова."
-        )
+        await update.message.reply_text("🔒 Подпишись: https://t.me/nikkatfun")
         return
 
     now = time.time()
-    if user_id in user_last_download and now - user_last_download[user_id] < RATE_LIMIT_SECONDS:
-        await update.message.reply_text("⏱ Лимит: 1 видео в минуту. Подожди немного.")
+    if uid in user_last_download and now - user_last_download[uid] < RATE_LIMIT_SECONDS:
+        await update.message.reply_text("⏱ Лимит: 1 видео в минуту.")
         return
 
     url = update.message.text.strip()
     if not re.match(r"https?://", url):
-        await update.message.reply_text("❌ Это не похоже на ссылку.")
+        await update.message.reply_text("❌ Это не ссылка.")
         return
 
-    await update.message.reply_text("🔍 Анализирую ссылку...")
-
-    ydl_opts = {
-        "quiet": True,
-        "noplaylist": True,
-    }
+    await update.message.reply_text("🔍 Анализирую...")
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as ydl:
             info = ydl.extract_info(url, download=False)
-    except Exception as e:
-        logging.error("Ошибка анализа ссылки:\n" + traceback.format_exc())
+    except:
+        logging.error(traceback.format_exc())
         await update.message.reply_text("❌ Не удалось обработать ссылку.")
         return
 
     formats = []
     for f in info.get("formats", []):
         if f.get("vcodec") != "none" and f.get("height"):
-            height = f.get("height")
-            fmt_id = f.get("format_id")
-            formats.append((fmt_id, f"{height}p"))
+            formats.append((f["format_id"], f'{f["height"]}p'))
 
     if not formats:
-        await update.message.reply_text("❌ Подходящие форматы не найдены.")
+        await update.message.reply_text("❌ Форматы не найдены.")
         return
 
-    unique = []
-    seen = set()
-    for fmt_id, label in sorted(formats, key=lambda x: int(x[1].replace("p", ""))):
-        if label not in seen:
-            seen.add(label)
-            unique.append((fmt_id, label))
-        if len(unique) >= 6:
-            break
+    uniq, seen = [], set()
+    for fid, lab in sorted(formats, key=lambda x: int(x[1].replace("p",""))):
+        if lab not in seen:
+            seen.add(lab); uniq.append((fid, lab))
+        if len(uniq) >= 6: break
 
-    buttons = []
-    for fmt_id, label in unique:
-        buttons.append([InlineKeyboardButton(label, callback_data=f"dl|{fmt_id}|{url}")])
+    buttons = [[InlineKeyboardButton(lab, callback_data=f"dl|{fid}|{url}")] for fid, lab in uniq]
+    buttons.append([InlineKeyboardButton("🔥 Максимальное качество (MP4)", callback_data=f"dl|best|{url}")])
 
-    buttons.append([InlineKeyboardButton("🔥 Максимальное качество", callback_data=f"dl|best|{url}")])
-
-    await update.message.reply_text(
-        "🎥 Выберите качество:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    await update.message.reply_text("🎥 Выбери качество:", reply_markup=InlineKeyboardMarkup(buttons))
 
 # ================= CALLBACK =================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data.split("|")
-    if data[0] != "dl":
-        return
-
-    fmt_id, url = data[1], data[2]
-    user_id = query.from_user.id
+    q = update.callback_query
+    await q.answer()
+    _, fid, url = q.data.split("|")
+    uid = q.from_user.id
 
     async with queue_lock:
-        download_queue.append((query, fmt_id, url, user_id))
-        position = len(download_queue)
+        download_queue.append((q, fid, url, uid))
+        pos = len(download_queue)
 
-    await query.edit_message_text(f"🔥 Задача добавлена в очередь. Позиция: {position}")
+    await q.edit_message_text(f"🔥 В очереди: {pos}")
 
-# ================= ОЧЕРЕДЬ ЗАГРУЗОК =================
+# ================= ОЧЕРЕДЬ =================
 async def queue_worker(app):
     while True:
         if download_queue:
             async with queue_lock:
-                query, fmt_id, url, user_id = download_queue.popleft()
-
+                q, fid, url, uid = download_queue.popleft()
             try:
-                await query.message.edit_text("⏬ Скачиваю видео...")
+                await q.message.edit_text("⏬ Скачиваю: 0%")
 
-                if fmt_id == "best":
-                    format_selector = "bestvideo+bestaudio/best"
+                # БЕЗ FFMPEG: берём ТОЛЬКО готовый MP4 со звуком
+                if fid == "best":
+                    fmt = "best[ext=mp4]/best"
                 else:
-                    format_selector = f"{fmt_id}+bestaudio/best"
+                    fmt = f"{fid}[ext=mp4]/best"
 
                 ydl_opts = {
-                    "format": format_selector,
+                    "format": fmt,
                     "outtmpl": f"{DOWNLOAD_PATH}/%(title)s.%(ext)s",
-                    "merge_output_format": "mp4",
                     "quiet": True,
                     "noplaylist": True,
+                    "concurrent_fragment_downloads": 4,
+                    "http_chunk_size": 10485760,
                     "socket_timeout": 30,
                     "retries": 3,
+                    "progress_hooks": [
+                        make_progress_hook(app, q.message.chat_id, q.message.message_id)
+                    ],
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url)
                     filename = ydl.prepare_filename(info)
 
-                await query.message.edit_text("📤 Отправляю видео...")
+                size_mb = os.path.getsize(filename) / (1024 * 1024)
 
-                file_size_mb = os.path.getsize(filename) / (1024 * 1024)
-
-                try:
-                    if file_size_mb <= 50:
-                        with open(filename, "rb") as f:
-                            await app.bot.send_video(
-                                chat_id=query.message.chat_id,
-                                video=f,
-                                caption="✅ Готово!",
-                            )
-                    else:
-                        with open(filename, "rb") as f:
-                            await app.bot.send_document(
-                                chat_id=query.message.chat_id,
-                                document=f,
-                                caption="✅ Видео отправлено файлом (оригинальное качество)",
-                            )
-                except Exception:
+                if size_mb <= 50:
                     with open(filename, "rb") as f:
-                        await app.bot.send_document(
-                            chat_id=query.message.chat_id,
-                            document=f,
-                            caption="✅ Видео отправлено файлом",
-                        )
+                        await app.bot.send_video(q.message.chat_id, f, caption="✅ Готово!", supports_streaming=True)
+                else:
+                    with open(filename, "rb") as f:
+                        await app.bot.send_document(q.message.chat_id, f, caption="✅ MP4 (файлом)")
 
                 os.remove(filename)
-                user_last_download[user_id] = time.time()
+                user_last_download[uid] = time.time()
 
-            except Exception as e:
-                logging.error("Ошибка загрузки:\n" + traceback.format_exc())
+            except:
+                logging.error(traceback.format_exc())
                 try:
-                    await query.message.edit_text("❌ Ошибка при скачивании или отправке.")
+                    await q.message.edit_text("❌ Ошибка при скачивании или отправке.")
                 except:
                     pass
-
         await asyncio.sleep(2)
 
 # ================= ЗАПУСК =================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("clearqueue", clearqueue))
-    app.add_handler(CommandHandler("showlog", showlog))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(callback_handler))
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(queue_worker(app))
-
+    asyncio.get_event_loop().create_task(queue_worker(app))
     print("🤖 Бот запущен...")
     app.run_polling()
 
